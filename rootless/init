@@ -1,0 +1,29 @@
+#!/bin/busybox sh
+# PID 1 keeps the block devices mounted until the LayerFS process exits.
+export PATH=/bin:/usr/bin
+export LAYERFS_CONSTRUCTION_WORKERS=1
+bb=/bin/busybox
+run_request() {
+    "$bb" mount -t proc proc /proc || return 125
+    "$bb" mount -t sysfs sys /sys || return 125
+    [ -c /dev/null ] || "$bb" mount -t devtmpfs dev /dev || return 125
+    "$bb" mount -t tmpfs -o mode=1777 tmpfs /tmp || return 125
+    "$bb" mount -t tmpfs -o mode=0755 tmpfs /run || return 125
+    "$bb" mount -t hostfs -o /proc/self/cwd/ none /request || return 125
+    "$bb" mount -t ext4 /dev/ubdb /data || return 125
+    "$bb" insmod /fuse.ko || return 125
+    "$bb" chmod 600 /dev/fuse || return 125
+    "$bb" mount -t fusectl fusectl /sys/fs/fuse/connections || return 125
+    "$bb" ip link set lo up || return 125
+    set --
+    while IFS= read -r -d '' arg; do set -- "$@" "$arg"; done </request/argv
+    if [ "$1" = init ]; then
+        "$bb" mount -t hostfs -o ro,/proc/self/cwd/source/ none /input || return 125
+    fi
+    /bin/layerfs-guest "$@" </request/stdin >/request/stdout 2>/request/stderr
+    rc=$?
+    "$bb" umount /data || return 125
+    printf '%s\n' "$rc" >/request/status
+}
+run_request
+/bin/busybox poweroff -f

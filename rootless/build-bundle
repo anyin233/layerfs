@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 022
+export LC_ALL=C
+if (( $# < 1 || $# > 3 )); then
+    echo "Usage: $0 OUTPUT_DIR [RELEASE_BIN_DIR [DEBIAN_CACHE_DIR]]" >&2
+    exit 2
+fi
+if [[ $(uname -sm) != 'Linux x86_64' ]]; then
+    echo "Build the bundle on Linux x86-64." >&2
+    exit 1
+fi
+output=$(realpath -m -- "$1")
+if (( $# >= 2 )); then
+    artifacts=$(realpath -m -- "$2")
+else
+    artifacts=core/target/release
+fi
+cache=$(realpath -m -- "${3:-${XDG_CACHE_HOME:-$HOME/.cache}/layerfs-rootless/debian}")
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+if [[ -e $output || -L $output ]]; then
+    echo "Output already exists: $output" >&2
+    exit 1
+fi
+mkdir -p -- "$(dirname -- "$output")" "$cache"
+work=$(mktemp -d -- "$(dirname -- "$output")/.layerfs-build.XXXXXX")
+trap 'rm -rf -- "${work:?}"' EXIT
+bundle=$work/bundle
+guest=$work/guest
+sources=$bundle/sources
+licenses=$bundle/licenses
+
+rust_root=$(rustc --print sysroot)
+if [[ ! -d $rust_root/lib/rustlib/src/rust/library ]]; then
+    echo "Install the matching rust-src component before building the bundle." >&2
+    exit 1
+fi
+if (( $# < 2 )); then
+    CARGO_TARGET_DIR="$PWD/core/target" cargo build --manifest-path core/Cargo.toml \
+        --locked --release --bin layerfs-guest
+fi
+if [[ ! -x $artifacts/layerfs-guest ]]; then
+    echo "Missing executable: $artifacts/layerfs-guest" >&2
+    exit 1
+fi
+
+mkdir -p -- "$bundle/lib" "$sources/debian" "$licenses" \
+    "$guest"/{bin,lib/x86_64-linux-gnu,lib64,usr/share,etc,request,data,input,tmp,run,proc,sys,dev}
+install -m 0755 rootless/layerfs-rootless "$bundle/layerfs-rootless"
+install -m 0755 rootless/init "$guest/init"
+install -m 0755 "$artifacts/layerfs-guest" "$guest/bin/"
+while read -r kind package digest path; do
+    [[ $kind != \#* ]] || continue
+    archive=$cache/${path##*/}
+    if [[ ! -f $archive ]]; then
+        curl --fail --silent --show-error --location --connect-timeout 10 --max-time 180 \
+            "https://deb.debian.org/debian/$path" -o "$work/download"
+        printf '%s  %s\n' "$digest" "$work/download" | sha256sum --check --status
+        mv -- "$work/download" "$archive"
+    fi
+    if ! printf '%s  %s\n' "$digest" "$archive" | sha256sum --check --status; then
+        echo "Pinned Debian checksum mismatch: $archive" >&2
+        exit 1
+    fi
+    case $kind in
+        binary) dpkg-deb --extract "$archive" "$work/debian" ;;
+        source)
+            mkdir -p -- "$sources/debian/$package"
+            cp --reflink=auto -- "$archive" "$sources/debian/$package/"
+            ;;
+    esac
+done < rootless/build-debian.lock
+cp rootless/build-debian.lock "$sources/debian/"
+for package in bash busybox gcc-16-base libc6 libtinfo6 ncurses-base user-mode-linux; do
+    install -m 0644 "$work/debian/usr/share/doc/$package/copyright" "$licenses/$package"
+done
+tar --occurrence -xOf "$sources/debian/busybox/busybox_1.38.0.orig.tar.bz2" \
+    busybox-1.38.0/LICENSE > "$licenses/GPL-2"
+tar --occurrence -xOf "$sources/debian/bash/bash_5.3.orig.tar.xz" \
+    bash-5.3/COPYING > "$licenses/GPL-3"
+tar --occurrence -xOf "$sources/debian/glibc/glibc_2.43.orig.tar.xz" \
+    glibc-2.43/COPYING.LIB > "$licenses/LGPL-2.1"
+install -m 0644 "$work/debian/usr/share/doc/user-mode-linux/config.gz" "$sources/debian/user-mode-linux/config.amd64.gz"
+
+install -m 0755 "$work/debian/usr/bin/linux.uml" "$bundle/linux.uml"
+python3 rootless/build-relocate-uml.py "$bundle/linux.uml"
+debian_lib=$work/debian/usr/lib/x86_64-linux-gnu
+install -m 0755 "$debian_lib"/{ld-linux-x86-64.so.2,libc.so.6} "$bundle/lib/"
+(
+    cd -- "$bundle"
+    LD_LIBRARY_PATH="$PWD/lib" ./linux.uml --version
+)
+
+install -m 0755 "$work/debian/usr/bin/"{bash,busybox} "$guest/bin/"
+install -m 0644 "$work/debian/usr/lib/uml/modules/7.3.4/kernel/fs/fuse/fuse.ko" "$guest/fuse.ko"
+guest_lib=$guest/lib/x86_64-linux-gnu
+install -m 0755 "$debian_lib/ld-linux-x86-64.so.2" "$guest_lib/"
+install -m 0644 "$debian_lib"/{libc.so.6,libm.so.6,libresolv.so.2,libgcc_s.so.1,libtinfo.so.6} "$guest_lib/"
+ln -s ../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 "$guest/lib64/ld-linux-x86-64.so.2"
+ln -s ../bin "$guest/usr/bin"
+cp -a "$work/debian/usr/share/terminfo" "$guest/usr/share/"
+printf 'root:x:0:0:root:/:/bin/bash\n' > "$guest/etc/passwd"
+printf 'root:x:0:\n' > "$guest/etc/group"
+loader=$guest_lib/ld-linux-x86-64.so.2
+busybox=("$loader" --library-path "$guest_lib" "$guest/bin/busybox")
+applets=$("${busybox[@]}" --list)
+for applet in xargs mount dd cat poweroff sh insmod ip umount; do
+    if ! grep -Fxq "$applet" <<< "$applets"; then
+        echo "Missing BusyBox applet: $applet" >&2
+        exit 1
+    fi
+done
+for applet in $applets; do
+    ln -s busybox "$guest/bin/$applet"
+done
+printf 'two words\0' |
+    "${busybox[@]}" xargs -0 "${busybox[@]}" printf '%s\n' |
+    grep -Fx 'two words'
+for binary in bash layerfs-guest; do
+    "$loader" --inhibit-cache --library-path "$guest_lib" --list "$guest/bin/$binary" |
+        awk -v lib="$guest_lib/" '$2 == "=>" && index($0, "=> " lib) == 0 { print > "/dev/stderr"; bad=1 } END { exit bad }'
+done
+
+# Populate the image with root-owned entries while building as an ordinary user.
+# shellcheck disable=SC2016
+fakeroot sh -eu -c '
+    chown -hR 0:0 "$1"
+    mke2fs -q -t ext4 -m 0 -d "$1" "$2" 128M
+' build-root "$guest" "$bundle/root.ext4"
+mke2fs -q -t ext4 -m 0 -E root_owner=0:0 "$bundle/empty.ext4" 1G
+chmod 0444 "$bundle"/{root.ext4,empty.ext4}
+
+# Include the patched fork, locked registry sources (with their license notices),
+# and the exact standard library sources used when building the Rust executables.
+tar --exclude-vcs --exclude=target --exclude=node_modules -czf "$sources/layerfs.tar.gz" \
+    LICENSE .cargo core/Cargo.toml core/Cargo.lock core/crates core/vendor core/patches api/binding \
+    rootless/build-* rootless/init rootless/layerfs-rootless
+cargo vendor --quiet --locked --manifest-path core/Cargo.toml "$work/vendor" > "$work/vendor.toml"
+mkdir -p "$work/.cargo"
+sed "s|^directory = .*|directory = \"vendor\"|" "$work/vendor.toml" > "$work/.cargo/vendor.toml"
+tar -C "$work" -czf "$sources/cargo-vendor.tar.gz" vendor .cargo/vendor.toml
+tar -C "$rust_root/lib/rustlib/src/rust" -czf "$sources/rust-library.tar.gz" library
+rustc -vV > "$sources/rustc.txt"
+install -m 0644 LICENSE "$licenses/LayerFS"
+cp -r "$rust_root/share/doc/rust/licenses" "$licenses/rust"
+install -m 0644 "$rust_root/share/doc/rust/COPYRIGHT-library.html" "$licenses/rust/"
+
+cat > "$sources/BUILD.txt" <<'EOF'
+LayerFS and packaging
+=====================
+layerfs.tar.gz contains the fork and the build and install scripts. Extract it,
+then run rootless/build-bundle OUTPUT_DIR on a Linux x86-64 machine. The
+builder uses Rust/Cargo (see rustc.txt), a C compiler and linker, rust-src,
+Python 3, curl, dpkg-deb, fakeroot, e2fsprogs, GNU tar and coreutils. Pin the same
+Rust toolchain when supplying prebuilt release binaries as RELEASE_BIN_DIR.
+To build Cargo from the bundled registry sources, extract cargo-vendor.tar.gz
+alongside the fork source and run:
+  cargo --config .cargo/vendor.toml build --manifest-path core/Cargo.toml \
+    --offline --locked --release --bin layerfs-guest
+rust-library.tar.gz contains the Rust standard library source for that toolchain.
+Registry and patched fuser license notices are in the respective source trees.
+
+Debian components
+=================
+debian/build-debian.lock records exact packages, corresponding source files,
+SHA-256 hashes, and their source URLs relative to https://deb.debian.org/debian/.
+Extract each source package with dpkg-source -x PACKAGE.dsc. Under the
+corresponding Debian build dependencies, use dpkg-buildpackage -b -us -uc
+to rebuild its binaries. Build Linux 7.3.4-1 first for user-mode-linux's
+linux-source-7.3 package. The UML source includes the amd64 build configuration
+and Debian build rules. config.amd64.gz is the final config from the binary
+package. The only change to Debian's UML executable is the relative PT_INTERP
+written by rootless/build-relocate-uml.py. The FUSE module is unchanged.
+EOF
+mv -T -- "$bundle" "$output"
+printf 'Bundle ready: %s\n' "$output"

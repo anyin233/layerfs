@@ -1,0 +1,203 @@
+//! Guest CLI transport for the original in-process Store dispatchers.
+use crate::{project, Result};
+use layerfs_bridge::{
+    control::{SdkCall, SdkRefusal, SdkValue},
+    provision::{StoreManifest, StoreProfile},
+    sdk_values::{hex, unhex},
+};
+use layerfs_history::{BranchId, LayerStackId};
+use layerfs_store_service::{
+    history::lookup::{failed, invalid, refuse, Answer},
+    OpenRefusal, StoreService,
+};
+use nix::unistd::mkdtemp;
+use serde_json::{json, Value};
+use std::{
+    ffi::OsStr,
+    fs,
+    io::{self, Write},
+    path::Path,
+};
+
+pub fn call(method: &OsStr, args: &OsStr) -> Result<u8> {
+    let method = method.to_str().ok_or("Store method must be UTF-8")?;
+    let args = args.to_str().ok_or("Store arguments must be UTF-8 JSON")?;
+    let Value::Object(args) = serde_json::from_str(args)? else {
+        return Err("Store arguments must be a JSON object".into());
+    };
+    let SdkValue::Map(fields) = sdk_value(Value::Object(args))? else {
+        return Err("Store arguments must be a JSON object of method fields".into());
+    };
+    let manifest = project::manifest()?;
+    if manifest.locator != project::STORE || manifest.profile != StoreProfile::Disposable {
+        return Err("project manifest must name the guest's Disposable Store".into());
+    }
+
+    let scratch = mkdtemp(
+        Path::new(project::PROJECT)
+            .join("store-call.XXXXXX")
+            .as_path(),
+    )?;
+    let template = scratch.join("overlay.sqlite");
+    let opened = StoreService::open_direct(
+        Path::new(project::STORE),
+        &manifest.binding,
+        manifest.cursor_key,
+        &template,
+    );
+    let service = match opened {
+        Ok(service) => service,
+        Err(error) => {
+            if let Err(cleanup) = fs::remove_dir_all(&scratch) {
+                eprintln!("layerfs-guest: cleanup at {}: {cleanup}", scratch.display());
+            }
+            let refusal = match error {
+                OpenRefusal::Unsupported(reason) => refuse("Unsupported", reason.0, SdkValue::Null),
+                OpenRefusal::Missing(reason) => refuse("NoStore", reason, SdkValue::Null),
+                OpenRefusal::Failed(reason) => failed(reason),
+            };
+            return output(Err(refusal), false);
+        }
+    };
+
+    let answer = dispatch(&service, &manifest, method, fields);
+    let retained = service.retained() != 0
+        || answer
+            .as_ref()
+            .is_err_and(|refusal| refusal.code == "Unknown");
+    let cleanup = service.close().and_then(|()| {
+        if !retained {
+            fs::remove_file(&template)
+                .and_then(|()| fs::remove_dir(&scratch))
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    });
+    if retained {
+        eprintln!("layerfs-guest: overlay retained at {}", scratch.display());
+    }
+    if let Err(error) = &cleanup {
+        eprintln!("layerfs-guest: cleanup at {}: {error}", scratch.display());
+    }
+    output(answer, cleanup.is_err())
+}
+
+fn dispatch(
+    service: &StoreService,
+    manifest: &StoreManifest,
+    method: &str,
+    mut fields: Vec<(String, SdkValue)>,
+) -> Answer {
+    if !fields.iter().any(|(name, _)| name == "project") {
+        let stack = LayerStackId::from_bytes(manifest.stack).map_err(failed)?;
+        let record = service
+            .store
+            .published(|history| history.layer_stack(stack))
+            .map_err(failed)?
+            .ok_or_else(|| failed("the manifest's project is missing"))?;
+        fields.push(("project".into(), SdkValue::text(record.name.as_str())));
+    }
+    // Fork keeps the SDK's default of the published main Layer.
+    if (method.starts_with("fs.")
+        || method.starts_with("backend.store.fs.")
+        || matches!(
+            method,
+            "branch.list_commits"
+                | "branch.merge"
+                | "branch.publish"
+                | "backend.store.branch.list_commit_storage"
+        ))
+        && !fields.iter().any(|(name, _)| name == "branch")
+    {
+        let branch = BranchId::from_bytes(manifest.branch).map_err(failed)?;
+        let record = service
+            .store
+            .published(|history| history.branch(branch))
+            .map_err(failed)?
+            .ok_or_else(|| failed("the manifest's Branch is missing"))?;
+        if record.name.as_str() == "main" {
+            return Err(invalid("the manifest's Branch uses the reserved name main"));
+        }
+        fields.push(("branch".into(), SdkValue::text(record.name.as_str())));
+    }
+    let call = SdkCall {
+        method: method.to_owned(),
+        args: SdkValue::Map(fields),
+    };
+    if method.starts_with("backend.store.") {
+        layerfs_store_service::operator::dispatch(service, &call)
+    } else {
+        layerfs_api::call(service, &call)
+    }
+}
+
+fn sdk_value(value: Value) -> Result<SdkValue> {
+    Ok(match value {
+        Value::Null => SdkValue::Null,
+        Value::Bool(value) => SdkValue::Bool(value),
+        Value::Number(value) => SdkValue::Int(
+            value
+                .as_i64()
+                .ok_or("JSON numbers must be signed 64-bit integers")?,
+        ),
+        Value::String(value) => SdkValue::Text(value),
+        Value::Array(items) => {
+            SdkValue::List(items.into_iter().map(sdk_value).collect::<Result<_>>()?)
+        }
+        Value::Object(mut fields) => {
+            if let Some(bytes) = fields.remove("$bytes") {
+                if !fields.is_empty() {
+                    return Err("a $bytes object must have exactly one field".into());
+                }
+                let text = bytes
+                    .as_str()
+                    .filter(|text| text.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                    .ok_or("$bytes must be a hex string")?;
+                SdkValue::Bytes(unhex(text).ok_or("$bytes must contain pairs of hex digits")?)
+            } else {
+                SdkValue::Map(
+                    fields
+                        .into_iter()
+                        .map(|(name, value)| Ok((name, sdk_value(value)?)))
+                        .collect::<Result<_>>()?,
+                )
+            }
+        }
+    })
+}
+
+fn json_value(value: SdkValue) -> Value {
+    match value {
+        SdkValue::Null => Value::Null,
+        SdkValue::Bool(value) => Value::Bool(value),
+        SdkValue::Int(value) => Value::from(value),
+        SdkValue::Text(value) => Value::String(value),
+        SdkValue::Bytes(value) => json!({ "$bytes": hex(&value) }),
+        SdkValue::List(items) => Value::Array(items.into_iter().map(json_value).collect()),
+        SdkValue::Map(fields) => Value::Object(
+            fields
+                .into_iter()
+                .map(|(name, value)| (name, json_value(value)))
+                .collect(),
+        ),
+    }
+}
+
+fn output(answer: Answer, cleanup_failed: bool) -> Result<u8> {
+    let (value, status) = match answer {
+        Ok(value) => (json_value(value), u8::from(cleanup_failed)),
+        Err(SdkRefusal {
+            code,
+            message,
+            detail,
+        }) => (
+            json!({ "refused": { "code": code, "message": message, "detail": json_value(detail) } }),
+            1,
+        ),
+    };
+    let mut stdout = io::stdout().lock();
+    serde_json::to_writer(&mut stdout, &value)?;
+    stdout.write_all(b"\n")?;
+    stdout.flush()?;
+    Ok(status)
+}

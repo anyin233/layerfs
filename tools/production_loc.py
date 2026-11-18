@@ -346,6 +346,8 @@ def blank_sql(source: str) -> str:
 
 def counted_lines(path: Path) -> int:
     text = path.read_text(encoding="utf-8")
+    if path.name in ("init", "layerfs-rootless"):
+        return sum(bool(line.strip()) and not line.lstrip().startswith("#") for line in text.splitlines())
     if path.suffix == ".rs":
         text = blank_inline_tests(blank_rust(text))
     elif path.suffix == ".sql":
@@ -355,7 +357,7 @@ def counted_lines(path: Path) -> int:
     return sum(1 for line in text.splitlines() if line.strip())
 
 
-SCOPES = ("core", "reference", "api", "dsh")
+SCOPES = ("core", "reference", "api", "dsh", "rootless")
 
 
 def scope_base(root: Path, scope: str) -> Path:
@@ -435,6 +437,8 @@ def dsh_crate(base: Path, path: Path) -> str:
 
 
 def crate_of(root: Path, scope: str, path: Path) -> str:
+    if scope == "rootless":
+        return "rootless"
     base = scope_base(root, scope)
     if scope == "api":
         return api_crate(root, path)
@@ -445,6 +449,9 @@ def crate_of(root: Path, scope: str, path: Path) -> str:
 
 
 def scope_files(root: Path, scope: str) -> list:
+    if scope == "rootless":
+        runtime = root / "rootless"
+        return [path for path in (runtime / "init", runtime / "layerfs-rootless") if path.is_file()]
     base = scope_base(root, scope)
     if not base.is_dir():
         return []

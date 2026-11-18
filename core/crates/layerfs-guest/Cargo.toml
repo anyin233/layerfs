@@ -1,0 +1,20 @@
+[package]
+name = "layerfs-guest"
+description = "Single-project LayerFS Init and Workspace command execution inside a Linux guest."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+layerfs-api = { path = "../layerfs-api" }
+layerfs-bridge = { path = "../layerfs-bridge" }
+layerfs-daemon = { path = "../layerfs-daemon" }
+layerfs-history = { path = "../layerfs-history" }
+layerfs-overlay = { path = "../layerfs-overlay" }
+layerfs-persistence = { path = "../layerfs-persistence" }
+layerfs-storage = { path = "../layerfs-storage" }
+layerfs-store-service = { path = "../layerfs-store-service" }
+layerfs-telemetry = { path = "../layerfs-telemetry" }
+nix = { version = "=0.31.3", features = ["fs", "mount", "sched", "user"] }
+serde_json = "=1.0.154"

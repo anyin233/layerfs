@@ -1,3 +1,17 @@
+# Rootless LayerFS
+
+This fork of [upstream LayerFS v1.1.0](https://github.com/Ephemeral-AI-Lab/layerfs/releases/tag/v1.1.0) adds a Linux command-line runtime for trusted projects. An ordinary host user can import a directory into a private disk image, run commands in a LayerFS Workspace, and query or merge its history. The bundled User-Mode Linux guest provides FUSE. The host needs no root access, Docker, KVM or FUSE device.
+
+[Download the rootless preview](https://github.com/anyin233/layerfs/releases/tag/v1.1.0-rootless.1) · [Installation and examples](rootless/README.md)
+
+**Tested platforms**
+
+- Ubuntu 22.04 LTS (x86-64)
+- Ubuntu 24.04 LTS (x86-64)
+- Debian 13 (x86-64)
+
+## Upstream LayerFS
+
 <p align="center">
   <a href="https://layerfs.ai/"><img src="docs/assets/readme/layerfs-mark.svg" alt="LayerFS" width="112"></a>
 </p>

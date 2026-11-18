@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+import argparse
+import contextlib
+import fcntl
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+def arguments():
+    parser = argparse.ArgumentParser(
+        description="Run LayerFS in an unprivileged User-Mode Linux guest."
+    )
+    sub = parser.add_subparsers(dest="operation", required=True)
+    init = sub.add_parser(
+        "init", help="import a source directory into a new project disk"
+    )
+    init.add_argument("disk", type=Path)
+    init.add_argument("source", type=Path)
+    run = sub.add_parser(
+        "run", help="run a command in a Workspace and commit on success"
+    )
+    run.add_argument("--branch", default="work", help="branch to mount (default: work)")
+    run.add_argument("disk", type=Path)
+    run.add_argument("command", nargs=argparse.REMAINDER)
+    call = sub.add_parser(
+        "call", help="invoke a direct Store method with JSON arguments"
+    )
+    call.add_argument("disk", type=Path)
+    call.add_argument("method")
+    call.add_argument("arguments", metavar="JSON")
+    args = parser.parse_args()
+    if args.operation == "run":
+        if args.command[:1] == ["--"]:
+            args.command = args.command[1:]
+        if not args.command or not args.command[0]:
+            parser.error("run requires a command")
+    return args
+
+
+def boot(bundle, disk, disk_fd, request, args):
+    # Short, constant block-device paths also work when user paths contain commas.
+    for name in ("lib", "root.ext4"):
+        (request / name).symlink_to(bundle / name)
+    (request / "project.ext4").symlink_to(disk)
+    if args.operation == "init":
+        (request / "source").symlink_to(args.source.resolve(strict=True))
+        command = ["init"]
+    elif args.operation == "call":
+        command = ["call", args.method, args.arguments]
+    else:
+        command = ["run", args.branch, "--", *args.command]
+    (request / "argv").write_bytes(
+        b"".join(os.fsencode(arg) + b"\0" for arg in command)
+    )
+    with (request / "stdin").open("wb") as sink:
+        if args.operation == "run" and not sys.stdin.isatty():
+            shutil.copyfileobj(sys.stdin.buffer, sink)
+    env = dict(
+        HOME=str(request),
+        TMPDIR=str(request),
+        LC_ALL="C",
+        LD_LIBRARY_PATH="lib",
+        PATH="/usr/bin:/bin",
+    )
+    kernel = [
+        bundle / "linux.uml",
+        "seccomp=on",
+        "mem=512M",
+        "umid=layerfs",
+        "ubd0r=root.ext4",
+        "ubd1=project.ext4",
+        "root=98:0",
+        "ro",
+        "init=/init",
+        "con=null",
+        "con0=fd:0,fd:1",
+    ]
+    with (request / "boot.log").open("wb") as log:
+        result = subprocess.run(
+            kernel,
+            cwd=request,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            pass_fds=(disk_fd,),
+        )
+    for name, sink in (("stdout", sys.stdout.buffer), ("stderr", sys.stderr.buffer)):
+        if (request / name).exists():
+            with (request / name).open("rb") as stream:
+                shutil.copyfileobj(stream, sink)
+            sink.flush()
+    status = request / "status"
+    if result.returncode or not status.is_file():
+        with (request / "boot.log").open("rb") as stream:
+            shutil.copyfileobj(stream, sys.stderr.buffer)
+        raise RuntimeError(
+            "UML stopped without a clean guest shutdown; inspect the project before retrying"
+        )
+    return int(status.read_text().strip())
+
+
+def main():
+    args = arguments()
+    bundle = Path(__file__).resolve().parent
+    disk = args.disk.absolute()
+    creating = args.operation == "init"
+    if creating:
+        src = args.source.resolve(strict=True)
+        if not src.is_dir():
+            raise ValueError("source must be a directory")
+        temp = Path(tempfile.gettempdir()).resolve()
+        if src in disk.resolve().parents or temp == src or src in temp.parents:
+            raise ValueError(
+                "keep the project disk and TMPDIR outside the imported directory"
+            )
+    flags = os.O_RDWR | (os.O_CREAT | os.O_EXCL if creating else 0)
+    with contextlib.ExitStack() as stack:
+        fd = os.open(disk, flags, 0o600)
+        stack.callback(os.close, fd)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("another invocation owns this project disk") from None
+        if creating:
+            subprocess.run(
+                ["cp", "--sparse=always", "--", bundle / "empty.ext4", disk], check=True
+            )
+        with tempfile.TemporaryDirectory(prefix="layerfs-") as directory:
+            return boot(bundle, disk, fd, Path(directory).resolve(), args)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
+        sys.exit(f"layerfs-rootless: {error}")
