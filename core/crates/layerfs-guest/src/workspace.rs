@@ -173,6 +173,14 @@ impl Runtime {
         outcome
     }
 
+    pub fn finish_task(self, outcome: Result<u8>) -> Result<u8> {
+        let outcome = match outcome {
+            Ok(crate::task::DISCARD) if self.release_confirmed => Ok(0),
+            other => other,
+        };
+        self.finish(outcome)
+    }
+
     pub fn finish(self, outcome: Result<u8>) -> Result<u8> {
         let cleanup = (|| -> Result<()> {
             drop(self.service);
@@ -239,7 +247,7 @@ fn control(service: &Service, request: Request) -> Result<Reply> {
 
 // PID 1 of a fresh PID, mount, IPC, UTS and network namespace. The inherited
 // cwd pins just this Workspace while a private /run hides the parent's mounts.
-pub fn isolated(directory: &OsStr, command: &OsStr, args: &[OsString]) -> Result<u8> {
+pub fn prepare_namespace(directory: &Path) -> Result<()> {
     for (at, mode) in [
         ("/request", "mode=000"),
         ("/tmp", "mode=1777"),
@@ -253,7 +261,6 @@ pub fn isolated(directory: &OsStr, command: &OsStr, args: &[OsString]) -> Result
             Some(mode),
         )?;
     }
-    let directory = Path::new(directory);
     fs::create_dir_all(directory)?;
     mount(
         Some("."),
@@ -283,6 +290,12 @@ pub fn isolated(directory: &OsStr, command: &OsStr, args: &[OsString]) -> Result
     {
         return Err("could not bring up private loopback".into());
     }
+    Ok(())
+}
+
+pub fn isolated(directory: &OsStr, command: &OsStr, args: &[OsString]) -> Result<u8> {
+    let directory = Path::new(directory);
+    prepare_namespace(directory)?;
     let status = Command::new(command)
         .args(args)
         .current_dir(directory)

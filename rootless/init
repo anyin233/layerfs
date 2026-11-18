@@ -27,6 +27,9 @@ run_request() {
     while IFS= read -r -d '' arg; do set -- "$@" "$arg"; done </request/argv
     if [ "$1" = init ]; then
         "$bb" mount -t hostfs -o ro,/proc/self/cwd/source/ none /input || return 125
+    elif [ "$1" = task ]; then
+        workspace_devices || return 125
+        "$bb" stty raw -echo </dev/ttyS0 || return 125
     elif [ "$1" = session ]; then
         "$bb" stty raw -echo </dev/ttyS0 || return 125
     elif [ "$1" = run ]; then

@@ -45,8 +45,10 @@ if [[ ! -x $artifacts/layerfs-guest ]]; then
 fi
 
 mkdir -p -- "$bundle/lib" "$sources/debian" "$licenses" \
-    "$guest"/{bin,lib/x86_64-linux-gnu,lib64,usr/share,etc,request,data,input,tmp,run,proc,sys,dev}
+    "$guest"/{bin,lib/x86_64-linux-gnu,lib64,usr/share,etc,workspace,request,data,input,tmp,run,proc,sys,dev}
 install -m 0755 rootless/layerfs-rootless "$bundle/layerfs-rootless"
+mkdir -p "$bundle/integrations"
+cp -r rootless/integrations/pi "$bundle/integrations/"
 install -m 0755 rootless/init "$guest/init"
 install -m 0755 "$artifacts/layerfs-guest" "$guest/bin/"
 while read -r kind package digest path; do
@@ -134,7 +136,7 @@ chmod 0444 "$bundle"/{root.ext4,empty.ext4}
 # and the exact standard library sources used when building the Rust executables.
 tar --exclude-vcs --exclude=target --exclude=node_modules -czf "$sources/layerfs.tar.gz" \
     LICENSE .cargo core/Cargo.toml core/Cargo.lock core/crates core/vendor core/patches api/binding \
-    rootless/build-* rootless/init rootless/layerfs-rootless
+    rootless/build-* rootless/init rootless/layerfs-rootless rootless/integrations/pi
 cargo vendor --quiet --locked --manifest-path core/Cargo.toml "$work/vendor" > "$work/vendor.toml"
 mkdir -p "$work/.cargo"
 sed "s|^directory = .*|directory = \"vendor\"|" "$work/vendor.toml" > "$work/.cargo/vendor.toml"

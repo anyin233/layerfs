@@ -4,7 +4,9 @@ import contextlib
 import fcntl
 import os
 from pathlib import Path
+import select
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -37,6 +39,11 @@ def arguments():
         "session", help="stream Store calls and Workspace runs through one guest"
     )
     session.add_argument("disk", type=Path)
+    task = sub.add_parser(
+        "task", help="execute commands in one explicitly finished Workspace"
+    )
+    task.add_argument("--branch", default="work")
+    task.add_argument("disk", type=Path)
     args = parser.parse_args()
     if args.operation == "run":
         if args.command[:1] == ["--"]:
@@ -62,15 +69,48 @@ def workspace_reply(request, index, code):
     (request / f"{index}.stdin").unlink()
 
 
-def serve(channel, request):
+def serve(channel, request, task=False):
     if channel.recv(1) != b"R":
         return False
+    active = False
+
+    def receive():
+        # An abandoned client can close stdout while a silent command is running.
+        if task:
+            for fd, events in watcher.poll():
+                if fd == sys.stdout.fileno():
+                    raise BrokenPipeError("task client closed its reply stream")
+        return channel.recv(1)
+
+    if task:
+        watcher = select.poll()
+        watcher.register(channel, select.POLLIN)
+        watcher.register(sys.stdout, 0)
+
+        def cancel(signum, frame):
+            if active:
+                channel.sendall(b"A")
+
+        signal.signal(signal.SIGUSR1, cancel)
+        print('{"ready":true}', flush=True)
     for index, line in enumerate(sys.stdin.buffer):
         payload = request / f"{index}.in"
         reply = request / f"{index}.out"
         payload.write_bytes(line)
         channel.sendall(b"C")
-        status = channel.recv(1)
+        active = True
+        if task:
+            print('{"running":true}', flush=True)
+        status = receive()
+        while status == b"S" and task:
+            chunk = request / f"{index}.chunk"
+            print('{"data":"' + chunk.read_bytes().hex() + '"}', flush=True)
+            chunk.unlink()
+            channel.sendall(b"Y")
+            status = receive()
+        active = False
+        if status == b"T":
+            return True  # Terminal outcome follows guest shutdown.
         if status not in (b"D", b"E", b"W", b"F"):
             return False
         if status in (b"W", b"F"):
@@ -95,6 +135,8 @@ def boot(bundle, disk, disk_fd, request, args):
     if args.operation == "init":
         (request / "source").symlink_to(args.source.resolve(strict=True))
         command = ["init"]
+    elif args.operation == "task":
+        command = ["task", args.branch]
     elif args.operation == "session":
         command = ["session"]
     elif args.operation == "call":
@@ -136,7 +178,7 @@ def boot(bundle, disk, disk_fd, request, args):
             stdout=log,
             stderr=subprocess.STDOUT,
         )
-        if args.operation == "session":
+        if args.operation in ("session", "task"):
             host, guest = socket.socketpair()
             with host, guest:
                 fd = guest.fileno()
@@ -146,7 +188,11 @@ def boot(bundle, disk, disk_fd, request, args):
                 ) as result:
                     guest.close()
                     try:
-                        confirmed = serve(host, request)
+                        confirmed = serve(host, request, args.operation == "task")
+                    except (BrokenPipeError, KeyboardInterrupt):
+                        if args.operation == "task":
+                            host.sendall(b"Q")
+                        raise
                     finally:
                         host.close()
         else:

@@ -38,6 +38,58 @@ EOF
 
 Store calls use the same methods, defaults and replies as `call`. The first `workspace.run` prepares FUSE and the overlay template. Each run mounts a fresh Workspace and guest UID 1000. It has private process, mount, IPC, UTS and network namespaces, temporary directories and loopback. Commands share the guest kernel across requests. Supply stdin as text or `{"$bytes":"00ff"}`. The reply contains `exit`, `stdout` and `stderr`, with both streams encoded as hexadecimal `$bytes` objects. A successful command commits before its reply. A nonzero command discards its edits and ends the session with its exit status. Invalid input or a Store refusal also stops the session at that request. Earlier successful operations remain published. A disconnected client must inspect the project before resending an unconfirmed mutation.
 
+## Pi coding agent
+
+Use the bundle's Pi launcher on Linux x86-64 with Pi coding agent 1.5.2 on PATH.
+Import the repository once, then open the project disk:
+
+```sh
+/path/to/bundle/layerfs-rootless init project.ext4 ./repository
+/path/to/bundle/integrations/pi/pi-layerfs project.ext4
+```
+
+Pi runs on the host with its configured model and credentials. The model sees
+its standard `read`, `edit`, `write` and `bash` tools and the path `/workspace`.
+These tools and interactive `!` commands share one mounted Workspace and one guest
+across turns. The project root's Pi instruction file comes from that Workspace.
+A Bash process can leave a service running for later calls; redirect the service's
+stdio to files. Shell variables belong to each Bash invocation. Supply project
+executables and their Linux dependencies in the image or the project itself.
+The included image provides Bash and BusyBox.
+
+Enter `/layerfs-commit` to save the task to the selected Branch, or
+`/layerfs-discard` to drop it. Either command closes the task and stops its
+descendants. The next tool call opens a fresh Workspace. Normal Pi shutdown
+discards an open task. In RPC mode send the slash command through `prompt` and
+wait for its handled response before closing Pi. A print-only invocation with
+no explicit commit also discards. Select a Branch with `LAYERFS_PI_BRANCH`
+(default `work`). The original import directory is independent of later edits.
+
+The launcher disables host project discovery, other Pi extensions, MCP and skills.
+Pi UI features that read host paths directly, including host file attachments,
+remain host operations. Additional host plugins need their own Workspace integration.
+
+## Task protocol
+
+`layerfs-rootless task [--branch NAME] DISK` owns the disk until the task
+finishes. Wait for the JSON line `{"ready":true}`, then exchange requests
+sequentially over stdin/stdout. Example requests:
+
+```jsonl
+["exec",{"argv":["bash","-c","cat > note"],"stdin":"pending change\n"}]
+["exec",{"argv":["cat","note"],"stream":true}]
+["commit",{}]
+```
+
+Each request starts with a `{"running":true}` acknowledgement. Streamed
+commands emit combined output as `{"data":"<hex>"}` chunks. A completed exec
+returns `exit`, `stdout` and `stderr` in the session Workspace format. Nonzero
+exits leave pending changes available for the next tool. After acknowledgement,
+SIGUSR1 cancels the foreground process group. The terminal requests are
+`commit` and `discard`; wait for launcher exit zero to confirm the result.
+Closing stdin without a terminal request discards. Inspect the Branch after a
+lost terminal reply before attempting another mutation.
+
 ## Branches, merge and recovery
 
 ```sh

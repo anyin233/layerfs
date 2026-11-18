@@ -16,5 +16,5 @@ layerfs-persistence = { path = "../layerfs-persistence" }
 layerfs-storage = { path = "../layerfs-storage" }
 layerfs-store-service = { path = "../layerfs-store-service" }
 layerfs-telemetry = { path = "../layerfs-telemetry" }
-nix = { version = "=0.31.3", features = ["fs", "mount", "sched", "user"] }
+nix = { version = "=0.31.3", features = ["fs", "mount", "poll", "sched", "signal", "user"] }
 serde_json = "=1.0.154"

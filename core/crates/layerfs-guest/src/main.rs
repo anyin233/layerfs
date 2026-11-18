@@ -8,6 +8,8 @@ mod session;
 #[cfg(target_os = "linux")]
 mod store;
 #[cfg(target_os = "linux")]
+mod task;
+#[cfg(target_os = "linux")]
 mod workspace;
 
 use std::process::ExitCode;
@@ -28,6 +30,12 @@ fn main() -> ExitCode {
             project::check_guest().and_then(|()| store::call(method, args))
         }
         [op] if op == OsStr::new("session") => project::check_guest().and_then(|()| session::run()),
+        [op, branch] if op == OsStr::new("task") => {
+            project::check_guest().and_then(|()| task::run(branch))
+        }
+        [op] if op == OsStr::new("task-worker") => {
+            project::check_guest().and_then(|()| task::worker())
+        }
         [op, dir, cmd, rest @ ..] if op == OsStr::new("exec") => {
             project::check_guest().and_then(|()| workspace::isolated(dir, cmd, rest))
         }

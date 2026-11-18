@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -eu
+if (( $# < 1 )); then
+    echo "usage: pi-layerfs DISK [pi options]" >&2
+    exit 2
+fi
+LAYERFS_PI_DISK=$(realpath -e -- "$1")
+export LAYERFS_PI_DISK
+shift
+here=$(dirname -- "$(realpath -- "$0")")
+cli=${LAYERFS_ROOTLESS_CLI:-"$here/../../layerfs-rootless"}
+LAYERFS_ROOTLESS_CLI=$(realpath -e -- "$(command -v -- "$cli")")
+export LAYERFS_ROOTLESS_CLI
+# A stable empty cwd keeps Pi's session discovery scoped to this disk and branch.
+key=$(printf '%s\0%s' "$LAYERFS_PI_DISK" "${LAYERFS_PI_BRANCH:-work}" | sha256sum)
+dir=${XDG_STATE_HOME:-"$HOME/.local/state"}/pi-layerfs/${key%% *}
+mkdir -p -m 0700 -- "$dir"
+cd -- "$dir"
+exec pi --no-extensions --no-mcp --no-skills --no-context-files --no-prompt-templates \
+    --no-builtin-tools -e "$here/index.js" "$@"
