@@ -31,4 +31,4 @@ pub use service::observations::JobWork;
 pub use service::owner_work::OwnerWork;
 pub use service::results::ServiceClass;
 pub use service::startup::OwnerStart;
-pub use store_service::{OpenRefusal, Retained, StoreService, CALLS};
+pub use store_service::{OpenRefusal, Retained, StoreService, CALLS, DIRECT_CACHE_BYTES};

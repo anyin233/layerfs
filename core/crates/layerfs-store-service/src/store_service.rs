@@ -31,7 +31,7 @@ pub struct Retained {
 /// libuv worker thread of the SDK binding.
 pub const CALLS: usize = 64;
 /// The Store's shared immutable-object cache, as a daemon's.
-const CACHE_BYTES: usize = 64 * 1024;
+pub const DIRECT_CACHE_BYTES: usize = 64 * 1024;
 /// Each private overlay's page cache, as a daemon's.
 const PAGER_KIB: u32 = 1024;
 
@@ -83,6 +83,17 @@ impl StoreService {
         cursor_key: [u8; 32],
         template: &Path,
     ) -> Result<Self, OpenRefusal> {
+        Self::open_direct_with_cache(store, binding, cursor_key, template, DIRECT_CACHE_BYTES)
+    }
+
+    /// Uses the caller's immutable object cache budget when this Store also serves kernel Workspaces.
+    pub fn open_direct_with_cache(
+        store: &Path,
+        binding: &[u8],
+        cursor_key: [u8; 32],
+        template: &Path,
+        cache_bytes: usize,
+    ) -> Result<Self, OpenRefusal> {
         kernel_guard::check(store).map_err(OpenRefusal::Unsupported)?;
         if !store.is_file() {
             return Err(OpenRefusal::Missing(format!(
@@ -96,7 +107,7 @@ impl StoreService {
             binding,
             cursor_key,
             CALLS,
-            CACHE_BYTES,
+            cache_bytes,
             ReservationBlocks::default(),
         )
         .map_err(|error| OpenRefusal::Failed(format!("Store open: {error}")))?;

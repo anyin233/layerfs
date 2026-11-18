@@ -12,13 +12,9 @@ workspace_devices() {
     "$bb" ip link set lo up || return 125
 }
 
-# unshare starts this path as PID 1 in a private namespace for one command.
-if [ "$1" = workspace ]; then
-    shift
-    "$bb" mount -t tmpfs -o mode=000 tmpfs /request || exit 125
-    "$bb" mount -t tmpfs -o mode=1777 tmpfs /tmp || exit 125
-    workspace_devices || exit 125
-    exec /bin/layerfs-guest run "$@"
+if [ "$1" = devices ]; then
+    workspace_devices
+    exit $?
 fi
 
 run_request() {

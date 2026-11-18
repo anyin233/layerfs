@@ -43,6 +43,7 @@ def check_session(cli, disk):
             send("fs.read", branch="continuous", path="/session-file")["text"]
             == "kept\n"
         )
+        send("fs.write", branch="continuous", path="/from-store", content="fresh")
         before = send("branch.list_commits", branch="continuous")["items"][0]["id"]
         result = send(
             "workspace.run",
@@ -51,7 +52,7 @@ def check_session(cli, disk):
                 "bash",
                 "-ec",
                 "test ! -e /tmp/previous; test ! -r /request/argv; "
-                "echo discard > session-file; exit 23",
+                'test "$(cat from-store)" = fresh; echo discard > session-file; exit 23',
             ],
         )
         assert result["exit"] == 23

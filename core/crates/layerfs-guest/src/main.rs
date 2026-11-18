@@ -28,6 +28,9 @@ fn main() -> ExitCode {
             project::check_guest().and_then(|()| store::call(method, args))
         }
         [op] if op == OsStr::new("session") => project::check_guest().and_then(|()| session::run()),
+        [op, dir, cmd, rest @ ..] if op == OsStr::new("exec") => {
+            project::check_guest().and_then(|()| workspace::isolated(dir, cmd, rest))
+        }
         [run, branch, delimiter, command, arguments @ ..]
             if run == OsStr::new("run") && delimiter == OsStr::new("--") =>
         {

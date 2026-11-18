@@ -23,11 +23,14 @@ pub fn call(method: &OsStr, args: &OsStr) -> Result<u8> {
     let method = method.to_str().ok_or("Store method must be UTF-8")?;
     let args = args.to_str().ok_or("Store arguments must be UTF-8 JSON")?;
     let fields = arguments(serde_json::from_str(args)?)?;
-    with_store(|service, defaults, retain| {
-        let answer = dispatch(service, defaults, method, fields);
-        *retain = uncertain(&answer);
-        output(answer, io::stdout().lock())
-    })
+    with_store(
+        layerfs_store_service::DIRECT_CACHE_BYTES,
+        |service, defaults, retain| {
+            let answer = dispatch(service, defaults, method, fields);
+            *retain = uncertain(&answer);
+            output(answer, io::stdout().lock())
+        },
+    )
 }
 
 pub fn arguments(args: Value) -> Result<Vec<(String, SdkValue)>> {
@@ -47,6 +50,7 @@ pub fn uncertain(answer: &Answer) -> bool {
 }
 
 pub fn with_store(
+    cache_bytes: usize,
     work: impl FnOnce(&StoreService, &mut Defaults<'_>, &mut bool) -> Result<u8>,
 ) -> Result<u8> {
     let manifest = project::manifest()?;
@@ -60,11 +64,12 @@ pub fn with_store(
             .as_path(),
     )?;
     let template = scratch.join("overlay.sqlite");
-    let opened = StoreService::open_direct(
+    let opened = StoreService::open_direct_with_cache(
         Path::new(project::STORE),
         &manifest.binding,
         manifest.cursor_key,
         &template,
+        cache_bytes,
     );
     let service = match opened {
         Ok(service) => service,

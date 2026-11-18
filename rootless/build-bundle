@@ -104,7 +104,7 @@ printf 'root:x:0:\n' > "$guest/etc/group"
 loader=$guest_lib/ld-linux-x86-64.so.2
 busybox=("$loader" --library-path "$guest_lib" "$guest/bin/busybox")
 applets=$("${busybox[@]}" --list)
-for applet in xargs mount dd cat poweroff sh insmod ip umount; do
+for applet in xargs mount dd cat poweroff sh insmod ip umount stty unshare; do
     if ! grep -Fxq "$applet" <<< "$applets"; then
         echo "Missing BusyBox applet: $applet" >&2
         exit 1

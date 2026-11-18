@@ -26,7 +26,7 @@ The host needs Linux x86-64, Python 3.7+, GNU `cp`, an executable bundle directo
 
 ## Continuous calls
 
-A bundle built from this checkout supports `session DISK`. Keep its stdin and stdout open for the lifetime of a task. Send one UTF-8 JSON array per line, flush stdin, and read one JSON reply before sending the next request. The session owns the disk lock, one UML guest and one direct Store connection until EOF. Closing stdin shuts down the guest. Check the process exit status to confirm shutdown.
+A bundle built from this checkout supports `session DISK`. Keep its stdin and stdout open for the lifetime of a task. Send one UTF-8 JSON array per line, flush stdin, and read one JSON reply before sending the next request. The session owns the disk lock, one UML guest and one open Store shared by the direct methods and Workspace service until EOF. Closing stdin shuts down the guest. Check the process exit status to confirm shutdown.
 
 ```sh
 "$cli" session project.ext4 <<'EOF'
@@ -36,7 +36,7 @@ A bundle built from this checkout supports `session DISK`. Keep its stdin and st
 EOF
 ```
 
-Store calls use the same methods, defaults and replies as `call`. Each `workspace.run` uses a fresh Workspace and guest UID 1000. It has private process, mount, IPC, UTS and network namespaces, temporary directories and loopback. Commands share the guest kernel across requests. Supply stdin as text or `{"$bytes":"00ff"}`. The reply contains `exit`, `stdout` and `stderr`, with both streams encoded as hexadecimal `$bytes` objects. A successful command commits before its reply. A nonzero command discards its edits and ends the session with its exit status. Invalid input or a Store refusal also stops the session at that request. Earlier successful operations remain published. A disconnected client must inspect the project before resending an unconfirmed mutation.
+Store calls use the same methods, defaults and replies as `call`. The first `workspace.run` prepares FUSE and the overlay template. Each run mounts a fresh Workspace and guest UID 1000. It has private process, mount, IPC, UTS and network namespaces, temporary directories and loopback. Commands share the guest kernel across requests. Supply stdin as text or `{"$bytes":"00ff"}`. The reply contains `exit`, `stdout` and `stderr`, with both streams encoded as hexadecimal `$bytes` objects. A successful command commits before its reply. A nonzero command discards its edits and ends the session with its exit status. Invalid input or a Store refusal also stops the session at that request. Earlier successful operations remain published. A disconnected client must inspect the project before resending an unconfirmed mutation.
 
 ## Branches, merge and recovery
 
