@@ -24,6 +24,20 @@ The host needs Linux x86-64, Python 3.7+, GNU `cp`, an executable bundle directo
 - One invocation may own a project image at a time. Keep the disk on a filesystem that supports advisory locks. Store history uses upstream's Disposable profile. Keep the original data or an independent backup. If the guest stops without confirming shutdown, inspect the retained disk before issuing another mutation.
 - `call DISK METHOD JSON` accepts an upstream direct Store method and prints JSON. SDK refusals include the error code and use a nonzero exit status. A JSON object with a single `"$bytes"` field represents hex-encoded binary data. `main` names the published line of Layers. File calls and commit listing default to the writable `work` Branch.
 
+## Continuous calls
+
+A bundle built from this checkout supports `session DISK`. Keep its stdin and stdout open for the lifetime of a task. Send one UTF-8 JSON array per line, flush stdin, and read one JSON reply before sending the next request. The session owns the disk lock, one UML guest and one direct Store connection until EOF. Closing stdin shuts down the guest. Check the process exit status to confirm shutdown.
+
+```sh
+"$cli" session project.ext4 <<'EOF'
+["branch.fork",{"name":"session-work","from":"work"}]
+["workspace.run",{"branch":"session-work","argv":["bash","-ec","cat > note"],"stdin":"saved in a workspace\n"}]
+["fs.read",{"branch":"session-work","path":"/note"}]
+EOF
+```
+
+Store calls use the same methods, defaults and replies as `call`. Each `workspace.run` uses a fresh Workspace and guest UID 1000. It has private process, mount, IPC, UTS and network namespaces, temporary directories and loopback. Commands share the guest kernel across requests. Supply stdin as text or `{"$bytes":"00ff"}`. The reply contains `exit`, `stdout` and `stderr`, with both streams encoded as hexadecimal `$bytes` objects. A successful command commits before its reply. A nonzero command discards its edits and ends the session with its exit status. Invalid input or a Store refusal also stops the session at that request. Earlier successful operations remain published. A disconnected client must inspect the project before resending an unconfirmed mutation.
+
 ## Branches, merge and recovery
 
 ```sh

@@ -5,6 +5,7 @@ import fcntl
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,10 @@ def arguments():
     call.add_argument("disk", type=Path)
     call.add_argument("method")
     call.add_argument("arguments", metavar="JSON")
+    session = sub.add_parser(
+        "session", help="stream Store calls and Workspace runs through one guest"
+    )
+    session.add_argument("disk", type=Path)
     args = parser.parse_args()
     if args.operation == "run":
         if args.command[:1] == ["--"]:
@@ -39,6 +44,47 @@ def arguments():
         if not args.command or not args.command[0]:
             parser.error("run requires a command")
     return args
+
+
+def workspace_reply(request, index, code):
+    # Stream binary output as JSON without a command-output-sized allocation.
+    sink = sys.stdout.buffer
+    sink.write(b'{"exit":' + code)
+    for name in ("stdout", "stderr"):
+        path = request / f"{index}.{name}"
+        sink.write(b',"' + name.encode() + b'":{"$bytes":"')
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(64 * 1024), b""):
+                sink.write(chunk.hex().encode())
+        sink.write(b'"}')
+        path.unlink()
+    sink.write(b"}\n")
+    (request / f"{index}.stdin").unlink()
+
+
+def serve(channel, request):
+    if channel.recv(1) != b"R":
+        return False
+    for index, line in enumerate(sys.stdin.buffer):
+        payload = request / f"{index}.in"
+        reply = request / f"{index}.out"
+        payload.write_bytes(line)
+        channel.sendall(b"C")
+        status = channel.recv(1)
+        if status not in (b"D", b"E", b"W", b"F"):
+            return False
+        if status in (b"W", b"F"):
+            workspace_reply(request, index, reply.read_bytes())
+        else:
+            with reply.open("rb") as stream:
+                shutil.copyfileobj(stream, sys.stdout.buffer)
+        sys.stdout.buffer.flush()
+        payload.unlink()
+        reply.unlink()
+        if status in (b"E", b"F"):
+            return True
+    channel.sendall(b"Q")
+    return True
 
 
 def boot(bundle, disk, disk_fd, request, args):
@@ -49,6 +95,8 @@ def boot(bundle, disk, disk_fd, request, args):
     if args.operation == "init":
         (request / "source").symlink_to(args.source.resolve(strict=True))
         command = ["init"]
+    elif args.operation == "session":
+        command = ["session"]
     elif args.operation == "call":
         command = ["call", args.method, args.arguments]
     else:
@@ -79,16 +127,30 @@ def boot(bundle, disk, disk_fd, request, args):
         "con=null",
         "con0=fd:0,fd:1",
     ]
+    confirmed = True
     with (request / "boot.log").open("wb") as log:
-        result = subprocess.run(
-            kernel,
+        options = dict(
             cwd=request,
             env=env,
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
-            pass_fds=(disk_fd,),
         )
+        if args.operation == "session":
+            host, guest = socket.socketpair()
+            with host, guest:
+                fd = guest.fileno()
+                kernel.append(f"ssl0=fd:{fd},fd:{fd}")
+                with subprocess.Popen(
+                    kernel, pass_fds=(disk_fd, fd), **options
+                ) as result:
+                    guest.close()
+                    try:
+                        confirmed = serve(host, request)
+                    finally:
+                        host.close()
+        else:
+            result = subprocess.run(kernel, pass_fds=(disk_fd,), **options)
     for name, sink in (("stdout", sys.stdout.buffer), ("stderr", sys.stderr.buffer)):
         if (request / name).exists():
             with (request / name).open("rb") as stream:
@@ -101,7 +163,12 @@ def boot(bundle, disk, disk_fd, request, args):
         raise RuntimeError(
             "UML stopped without a clean guest shutdown; inspect the project before retrying"
         )
-    return int(status.read_text().strip())
+    code = int(status.read_text().strip())
+    if not confirmed and code == 0:
+        raise RuntimeError(
+            "session ended without confirming its reply; inspect the project before retrying"
+        )
+    return code
 
 
 def main():

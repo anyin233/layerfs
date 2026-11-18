@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 
+from session import check_session
+
 
 def smoke(cli, directory):
     disk = directory / "project, with spaces.ext4"
@@ -79,6 +81,7 @@ def smoke(cli, directory):
         "call", disk, "branch.list_commits", '{"branch":"missing"}', code=1
     )
     assert json.loads(refused.stdout)["refused"]["code"] == "NoSuchBranch"
+    check_session(cli, disk)
     assert (source / "note").read_bytes() == b"original\n"
     assert set(os.listdir(source)) == {"note", "link"}
 

@@ -22,12 +22,33 @@ use std::{
 pub fn call(method: &OsStr, args: &OsStr) -> Result<u8> {
     let method = method.to_str().ok_or("Store method must be UTF-8")?;
     let args = args.to_str().ok_or("Store arguments must be UTF-8 JSON")?;
-    let Value::Object(args) = serde_json::from_str(args)? else {
+    let fields = arguments(serde_json::from_str(args)?)?;
+    with_store(|service, manifest, retain| {
+        let answer = dispatch(service, manifest, method, fields);
+        *retain = uncertain(&answer);
+        output(answer, io::stdout().lock())
+    })
+}
+
+pub fn arguments(args: Value) -> Result<Vec<(String, SdkValue)>> {
+    let Value::Object(args) = args else {
         return Err("Store arguments must be a JSON object".into());
     };
     let SdkValue::Map(fields) = sdk_value(Value::Object(args))? else {
         return Err("Store arguments must be a JSON object of method fields".into());
     };
+    Ok(fields)
+}
+
+pub fn uncertain(answer: &Answer) -> bool {
+    answer
+        .as_ref()
+        .is_err_and(|refusal| refusal.code == "Unknown")
+}
+
+pub fn with_store(
+    work: impl FnOnce(&StoreService, &StoreManifest, &mut bool) -> Result<u8>,
+) -> Result<u8> {
     let manifest = project::manifest()?;
     if manifest.locator != project::STORE || manifest.profile != StoreProfile::Disposable {
         return Err("project manifest must name the guest's Disposable Store".into());
@@ -56,15 +77,13 @@ pub fn call(method: &OsStr, args: &OsStr) -> Result<u8> {
                 OpenRefusal::Missing(reason) => refuse("NoStore", reason, SdkValue::Null),
                 OpenRefusal::Failed(reason) => failed(reason),
             };
-            return output(Err(refusal), false);
+            return output(Err(refusal), io::stdout().lock());
         }
     };
 
-    let answer = dispatch(&service, &manifest, method, fields);
-    let retained = service.retained() != 0
-        || answer
-            .as_ref()
-            .is_err_and(|refusal| refusal.code == "Unknown");
+    let mut retained = false;
+    let outcome = work(&service, &manifest, &mut retained);
+    retained |= service.retained() != 0;
     let cleanup = service.close().and_then(|()| {
         if !retained {
             fs::remove_file(&template)
@@ -79,10 +98,10 @@ pub fn call(method: &OsStr, args: &OsStr) -> Result<u8> {
     if let Err(error) = &cleanup {
         eprintln!("layerfs-guest: cleanup at {}: {error}", scratch.display());
     }
-    output(answer, cleanup.is_err())
+    outcome.map(|status| status.max(u8::from(cleanup.is_err())))
 }
 
-fn dispatch(
+pub fn dispatch(
     service: &StoreService,
     manifest: &StoreManifest,
     method: &str,
@@ -183,9 +202,9 @@ fn json_value(value: SdkValue) -> Value {
     }
 }
 
-fn output(answer: Answer, cleanup_failed: bool) -> Result<u8> {
+pub fn output(answer: Answer, mut stdout: impl Write) -> Result<u8> {
     let (value, status) = match answer {
-        Ok(value) => (json_value(value), u8::from(cleanup_failed)),
+        Ok(value) => (json_value(value), 0),
         Err(SdkRefusal {
             code,
             message,
@@ -195,7 +214,6 @@ fn output(answer: Answer, cleanup_failed: bool) -> Result<u8> {
             1,
         ),
     };
-    let mut stdout = io::stdout().lock();
     serde_json::to_writer(&mut stdout, &value)?;
     stdout.write_all(b"\n")?;
     stdout.flush()?;

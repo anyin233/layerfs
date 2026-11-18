@@ -3,6 +3,24 @@
 export PATH=/bin:/usr/bin
 export LAYERFS_CONSTRUCTION_WORKERS=1
 bb=/bin/busybox
+workspace_devices() {
+    "$bb" mount -t sysfs sys /sys || return 125
+    "$bb" mount -t tmpfs -o mode=0755 tmpfs /run || return 125
+    [ -c /dev/fuse ] || "$bb" insmod /fuse.ko || return 125
+    "$bb" chmod 600 /dev/fuse || return 125
+    "$bb" mount -t fusectl fusectl /sys/fs/fuse/connections || return 125
+    "$bb" ip link set lo up || return 125
+}
+
+# unshare starts this path as PID 1 in a private namespace for one command.
+if [ "$1" = workspace ]; then
+    shift
+    "$bb" mount -t tmpfs -o mode=000 tmpfs /request || exit 125
+    "$bb" mount -t tmpfs -o mode=1777 tmpfs /tmp || exit 125
+    workspace_devices || exit 125
+    exec /bin/layerfs-guest run "$@"
+fi
+
 run_request() {
     "$bb" mount -t proc proc /proc || return 125
     [ -c /dev/null ] || "$bb" mount -t devtmpfs dev /dev || return 125
@@ -13,13 +31,10 @@ run_request() {
     while IFS= read -r -d '' arg; do set -- "$@" "$arg"; done </request/argv
     if [ "$1" = init ]; then
         "$bb" mount -t hostfs -o ro,/proc/self/cwd/source/ none /input || return 125
+    elif [ "$1" = session ]; then
+        "$bb" stty raw -echo </dev/ttyS0 || return 125
     elif [ "$1" = run ]; then
-        "$bb" mount -t sysfs sys /sys || return 125
-        "$bb" mount -t tmpfs -o mode=0755 tmpfs /run || return 125
-        "$bb" insmod /fuse.ko || return 125
-        "$bb" chmod 600 /dev/fuse || return 125
-        "$bb" mount -t fusectl fusectl /sys/fs/fuse/connections || return 125
-        "$bb" ip link set lo up || return 125
+        workspace_devices || return 125
     fi
     /bin/layerfs-guest "$@" </request/stdin >/request/stdout 2>/request/stderr
     rc=$?

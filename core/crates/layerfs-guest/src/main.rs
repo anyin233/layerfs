@@ -4,6 +4,8 @@
 #[cfg(target_os = "linux")]
 mod project;
 #[cfg(target_os = "linux")]
+mod session;
+#[cfg(target_os = "linux")]
 mod store;
 #[cfg(target_os = "linux")]
 mod workspace;
@@ -25,13 +27,14 @@ fn main() -> ExitCode {
         [call, method, args] if call == OsStr::new("call") => {
             project::check_guest().and_then(|()| store::call(method, args))
         }
+        [op] if op == OsStr::new("session") => project::check_guest().and_then(|()| session::run()),
         [run, branch, delimiter, command, arguments @ ..]
             if run == OsStr::new("run") && delimiter == OsStr::new("--") =>
         {
             project::check_guest().and_then(|()| workspace::run(branch, command, arguments))
         }
         _ => {
-            eprintln!("usage: layerfs-guest init | layerfs-guest run BRANCH -- COMMAND [ARG ...] | layerfs-guest call METHOD JSON");
+            eprintln!("usage: layerfs-guest init | layerfs-guest run BRANCH -- COMMAND [ARG ...] | layerfs-guest call METHOD JSON | layerfs-guest session");
             return ExitCode::from(2);
         }
     };
