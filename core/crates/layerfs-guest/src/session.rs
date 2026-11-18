@@ -10,7 +10,7 @@ use std::{
 };
 
 pub fn run() -> Result<u8> {
-    store::with_store(|service, manifest, retain| {
+    store::with_store(|service, defaults, retain| {
         let mut channel = OpenOptions::new()
             .read(true)
             .write(true)
@@ -36,7 +36,7 @@ pub fn run() -> Result<u8> {
                 channel.write_all(b"W")?;
                 continue;
             }
-            let answer = store::dispatch(service, manifest, &method, store::arguments(args)?);
+            let answer = store::dispatch(service, defaults, &method, store::arguments(args)?);
             *retain = store::uncertain(&answer) || service.retained() != 0;
             let reply = BufWriter::new(File::create(format!("/request/{index}.out"))?);
             let code = store::output(answer, reply)?;

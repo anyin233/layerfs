@@ -23,8 +23,8 @@ pub fn call(method: &OsStr, args: &OsStr) -> Result<u8> {
     let method = method.to_str().ok_or("Store method must be UTF-8")?;
     let args = args.to_str().ok_or("Store arguments must be UTF-8 JSON")?;
     let fields = arguments(serde_json::from_str(args)?)?;
-    with_store(|service, manifest, retain| {
-        let answer = dispatch(service, manifest, method, fields);
+    with_store(|service, defaults, retain| {
+        let answer = dispatch(service, defaults, method, fields);
         *retain = uncertain(&answer);
         output(answer, io::stdout().lock())
     })
@@ -47,7 +47,7 @@ pub fn uncertain(answer: &Answer) -> bool {
 }
 
 pub fn with_store(
-    work: impl FnOnce(&StoreService, &StoreManifest, &mut bool) -> Result<u8>,
+    work: impl FnOnce(&StoreService, &mut Defaults<'_>, &mut bool) -> Result<u8>,
 ) -> Result<u8> {
     let manifest = project::manifest()?;
     if manifest.locator != project::STORE || manifest.profile != StoreProfile::Disposable {
@@ -82,7 +82,12 @@ pub fn with_store(
     };
 
     let mut retained = false;
-    let outcome = work(&service, &manifest, &mut retained);
+    let mut defaults = Defaults {
+        manifest: &manifest,
+        project: None,
+        branch: None,
+    };
+    let outcome = work(&service, &mut defaults, &mut retained);
     retained |= service.retained() != 0;
     let cleanup = service.close().and_then(|()| {
         if !retained {
@@ -101,20 +106,41 @@ pub fn with_store(
     outcome.map(|status| status.max(u8::from(cleanup.is_err())))
 }
 
+// Sessions own the disk. The Store API can move heads, but cannot rename a project or Branch.
+pub struct Defaults<'a> {
+    manifest: &'a StoreManifest,
+    project: Option<String>,
+    branch: Option<String>,
+}
+
+fn name(
+    slot: &mut Option<String>,
+    load: impl FnOnce() -> std::result::Result<String, SdkRefusal>,
+) -> Answer {
+    let name = match slot {
+        Some(name) => name,
+        None => slot.insert(load()?),
+    };
+    Ok(SdkValue::text(name.as_str()))
+}
+
 pub fn dispatch(
     service: &StoreService,
-    manifest: &StoreManifest,
+    defaults: &mut Defaults<'_>,
     method: &str,
     mut fields: Vec<(String, SdkValue)>,
 ) -> Answer {
     if !fields.iter().any(|(name, _)| name == "project") {
-        let stack = LayerStackId::from_bytes(manifest.stack).map_err(failed)?;
-        let record = service
-            .store
-            .published(|history| history.layer_stack(stack))
-            .map_err(failed)?
-            .ok_or_else(|| failed("the manifest's project is missing"))?;
-        fields.push(("project".into(), SdkValue::text(record.name.as_str())));
+        let project = name(&mut defaults.project, || {
+            let stack = LayerStackId::from_bytes(defaults.manifest.stack).map_err(failed)?;
+            let record = service
+                .store
+                .published(|history| history.layer_stack(stack))
+                .map_err(failed)?
+                .ok_or_else(|| failed("the manifest's project is missing"))?;
+            Ok(record.name.as_str().to_owned())
+        })?;
+        fields.push(("project".into(), project));
     }
     // Fork keeps the SDK's default of the published main Layer.
     if (method.starts_with("fs.")
@@ -128,16 +154,19 @@ pub fn dispatch(
         ))
         && !fields.iter().any(|(name, _)| name == "branch")
     {
-        let branch = BranchId::from_bytes(manifest.branch).map_err(failed)?;
-        let record = service
-            .store
-            .published(|history| history.branch(branch))
-            .map_err(failed)?
-            .ok_or_else(|| failed("the manifest's Branch is missing"))?;
-        if record.name.as_str() == "main" {
-            return Err(invalid("the manifest's Branch uses the reserved name main"));
-        }
-        fields.push(("branch".into(), SdkValue::text(record.name.as_str())));
+        let branch = name(&mut defaults.branch, || {
+            let id = BranchId::from_bytes(defaults.manifest.branch).map_err(failed)?;
+            let record = service
+                .store
+                .published(|history| history.branch(id))
+                .map_err(failed)?
+                .ok_or_else(|| failed("the manifest's Branch is missing"))?;
+            if record.name.as_str() == "main" {
+                return Err(invalid("the manifest's Branch uses the reserved name main"));
+            }
+            Ok(record.name.as_str().to_owned())
+        })?;
+        fields.push(("branch".into(), branch));
     }
     let call = SdkCall {
         method: method.to_owned(),
