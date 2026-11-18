@@ -1,0 +1,22 @@
+{
+  "before": {
+    "image_bytes": 69165056,
+    "image_apparent_bytes": 1073741824,
+    "store_bytes": 51118080,
+    "store_allocated_bytes": 51118080,
+    "itable_allocated_bytes": 16777216,
+    "itable_zeroed_groups": 8,
+    "itable_groups": 8
+  },
+  "after": {
+    "image_bytes": 69246976,
+    "image_apparent_bytes": 1073741824,
+    "store_bytes": 51118080,
+    "store_allocated_bytes": 51118080,
+    "itable_allocated_bytes": 16777216,
+    "itable_zeroed_groups": 8,
+    "itable_groups": 8
+  },
+  "branch_history_unchanged": true,
+  "seconds": 10
+}
